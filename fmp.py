@@ -3,8 +3,6 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Replace this with your real API key
-API_KEY = 'GV3lQA95GYzn0b6TEjhveb1hTLtU8tDr'
 
 def get_financial_data(ticker, start_year, end_year):
     url = f'https://financialmodelingprep.com/api/v3/income-statement/{ticker}?limit=120&apikey={API_KEY}'

@@ -29,84 +29,128 @@ def fetch_sec_data(cik, tag):
     return r.json()
 
 
-# Parse the API data into a DataFrame
+# Parse the API data into a DataFrame - UPDATED to include frame
 def parse_data(json_data):
     records = []
     for entry in json_data.get("units", {}).get("USD", []):
-        if 'end' in entry:
+        # Only include entries that have a quarterly frame (CY____Q_)
+        frame = entry.get("frame", "")
+        if 'end' in entry and frame and "Q" in frame:
             date = entry["end"]
             val = entry["val"]
             form = entry.get("form", "")
             fy = entry.get("fy", "")
-            fq = entry.get("fp", "")
+            fp = entry.get("fp", "")
             records.append({
                 "date": date,
                 "val": val,
                 "form": form,
                 "fy": fy,
-                "fp": fq,
+                "fp": fp,
+                "frame": frame  # Include frame field
             })
     df = pd.DataFrame(records)
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values(by='date', ascending=False)
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values(by='date', ascending=False)
     return df
 
 
-# Combine all data into one DataFrame
+# Combine all data into one DataFrame - UPDATED
 def build_financial_table(cik):
-    data = {}
+    all_data = pd.DataFrame()
+    
     for label, tag in TAGS.items():
         json_data = fetch_sec_data(cik, tag)
         if json_data:
             df = parse_data(json_data)
-            df = df.rename(columns={"val": label})
-            if isinstance(data, pd.DataFrame) and not data.empty:
-                data = pd.merge(data, df[["date", label]], on="date", how="outer")
-            else:
-                data = df[["date", label]]
+            if not df.empty:
+                df = df.rename(columns={"val": label})
+                # Keep only the columns we need plus frame
+                df_subset = df[["date", "frame", label]].copy()
+                
+                if all_data.empty:
+                    all_data = df_subset
+                else:
+                    all_data = pd.merge(all_data, df_subset, on=["date", "frame"], how="outer")
 
-    if not isinstance(data, pd.DataFrame):
+    if all_data.empty:
         return pd.DataFrame()
-    data = data.sort_values(by="date", ascending=False)
-    data['Quarter'] = data['date'].dt.to_period('Q')
-    data = data.dropna(subset=["Revenue", "Gross Profit"])
-    data = data.drop_duplicates(subset=["Quarter"], keep="first")
+    
+    # Sort by date descending
+    all_data = all_data.sort_values(by="date", ascending=False)
+    
+    # Create Quarter column from frame
+    all_data['Quarter'] = all_data['frame']
+    
+    # Remove rows where we don't have both Revenue and Gross Profit
+    all_data = all_data.dropna(subset=["Revenue", "Gross Profit"])
+    
+    # Remove duplicates based on frame/Quarter
+    all_data = all_data.drop_duplicates(subset=["Quarter"], keep="first")
 
-    data["Gross Margin"] = data["Gross Profit"] / data["Revenue"]
-    data = data.reset_index(drop=True)
-    return data
+    # Calculate Gross Margin
+    all_data["Gross Margin"] = all_data["Gross Profit"] / all_data["Revenue"]
+    
+    all_data = all_data.reset_index(drop=True)
+    return all_data
 
 
-# QoQ and YoY change calculator
+# FIXED: QoQ and YoY change calculator using frame logic
 def compute_changes(df, selected_quarter):
-    df = df.set_index("Quarter")
-
-    if selected_quarter not in df.index:
-        raise ValueError(f"Selected quarter {selected_quarter} not found in data.")
-
     # Define which columns are financial metrics
     metric_cols = ["Revenue", "Gross Profit", "Net Income", "Cash Flow", "Gross Margin"]
-
-    current = df.loc[selected_quarter, metric_cols]
-
+    
+    # Find the row for the selected quarter
+    current_row = df[df['Quarter'] == selected_quarter]
+    if current_row.empty:
+        raise ValueError(f"Selected quarter {selected_quarter} not found in data.")
+    
+    current = current_row[metric_cols].iloc[0]
+    
     # Initialize default 'N/A' Series
     qoq = pd.Series("N/A", index=metric_cols)
     yoy = pd.Series("N/A", index=metric_cols)
-
-    # Quarter-over-Quarter
-    prev_q = selected_quarter - 1
-    if prev_q in df.index:
-        prev = df.loc[prev_q, metric_cols]
-        qoq = (current - prev) / prev
-
-    # Year-over-Year
-    prev_y = selected_quarter - 4
-    if prev_y in df.index:
-        prev_year = df.loc[prev_y, metric_cols]
-        yoy = (current - prev_year) / prev_year
-
+    
+    # Extract year and quarter from frame (e.g., "CY2018Q3" -> year=2018, quarter=3)
+    if selected_quarter.startswith("CY") and "Q" in selected_quarter:
+        year_str = selected_quarter[2:6]  # Extract year (positions 2-5)
+        quarter_str = selected_quarter[-1]  # Extract quarter (last character)
+        
+        try:
+            year = int(year_str)
+            quarter = int(quarter_str)
+            
+            # Quarter-over-Quarter (previous quarter)
+            if quarter > 1:
+                prev_quarter_frame = f"CY{year}Q{quarter-1}"
+            else:
+                # If Q1, go to Q4 of previous year
+                prev_quarter_frame = f"CY{year-1}Q4"
+            
+            prev_q_row = df[df['Quarter'] == prev_quarter_frame]
+            if not prev_q_row.empty:
+                prev_q_vals = prev_q_row[metric_cols].iloc[0]
+                # Calculate QoQ change only for non-null values
+                for col in metric_cols:
+                    if pd.notna(current[col]) and pd.notna(prev_q_vals[col]) and prev_q_vals[col] != 0:
+                        qoq[col] = (current[col] - prev_q_vals[col]) / prev_q_vals[col]
+            
+            # Year-over-Year (same quarter previous year)
+            prev_year_frame = f"CY{year-1}Q{quarter}"
+            prev_y_row = df[df['Quarter'] == prev_year_frame]
+            if not prev_y_row.empty:
+                prev_y_vals = prev_y_row[metric_cols].iloc[0]
+                # Calculate YoY change only for non-null values
+                for col in metric_cols:
+                    if pd.notna(current[col]) and pd.notna(prev_y_vals[col]) and prev_y_vals[col] != 0:
+                        yoy[col] = (current[col] - prev_y_vals[col]) / prev_y_vals[col]
+                        
+        except ValueError:
+            # If we can't parse the year/quarter, just return N/A
+            pass
+    
     return current, qoq, yoy
-
 
 
 # ================= Streamlit App ===================
@@ -126,7 +170,7 @@ df = load_data(ticker)
 if df.empty:
     st.warning("No financial data available.")
 else:
-    available_quarters = df['Quarter'].unique().tolist()
+    available_quarters = sorted(df['Quarter'].unique().tolist(), reverse=True)
     selected_q = st.selectbox("Select Quarter", options=available_quarters)
 
     current, qoq, yoy = compute_changes(df.copy(), selected_q)
@@ -159,4 +203,3 @@ else:
     # Display the final table
     st.subheader(f"📊 Financial Summary for {selected_q}")
     st.table(formatted_combined)
-
