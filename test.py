@@ -12,7 +12,7 @@ HEADERS = {
 COMPANY_INFO = {
     "Intel": {
         "cik": "0000050863",
-        "revenue_tag": "SalesRevenueNet"
+        "revenue_tag": "RevenueFromContractWithCustomerExcludingAssessedTax"
     },
     "Texas Instruments": {
         "cik": "0000097476",
